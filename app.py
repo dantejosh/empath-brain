@@ -1,12 +1,11 @@
 import requests
-from flask import Flask, jsonify
+from flask import Flask, jsonify, Response
 from statistics import mean
 
 app = Flask(__name__)
 
 FEAR_GREED_URL = "https://api.alternative.me/fng/"
 
-# --- Simple headline sample (temporary narrative proxy) ---
 HEADLINES = [
     "Ceasefire talks show cautious progress",
     "Severe flooding displaces thousands",
@@ -15,54 +14,42 @@ HEADLINES = [
     "Rising food insecurity concerns aid groups",
 ]
 
-# --- Very lightweight sentiment scoring ---
+
 def score_text(text):
-    positive_words = ["progress", "stabilize", "breakthrough"]
-    negative_words = ["flooding", "displaces", "insecurity", "volatility"]
+    positive = ["progress", "stabilize", "breakthrough"]
+    negative = ["flooding", "displaces", "insecurity", "volatility"]
 
     score = 50
-
-    for w in positive_words:
+    for w in positive:
         if w in text.lower():
             score += 10
-    for w in negative_words:
+    for w in negative:
         if w in text.lower():
             score -= 10
 
     return max(0, min(100, score))
 
 
-# --- Structural mood ---
 def get_fear_greed():
     try:
         r = requests.get(FEAR_GREED_URL, timeout=5)
-        data = r.json()
-        return float(data["data"][0]["value"])
+        return float(r.json()["data"][0]["value"])
     except Exception:
         return 50.0
 
 
-# --- Narrative mood ---
 def narrative_index():
-    scores = [score_text(h) for h in HEADLINES]
-    return mean(scores)
+    return mean(score_text(h) for h in HEADLINES)
 
 
-# --- Empath fusion ---
 def empath_index():
     structural = get_fear_greed()
     narrative = narrative_index()
-    expressive = narrative  # placeholder for future AI layer
+    expressive = narrative
 
-    return round(
-        0.15 * structural +
-        0.30 * narrative +
-        0.55 * expressive,
-        2
-    )
+    return round(0.15 * structural + 0.30 * narrative + 0.55 * expressive, 2)
 
 
-# --- Calm narrative summary ---
 def build_narrative(index):
     if index < 35:
         tone = "Global emotional tone feels heavy and subdued."
@@ -84,16 +71,58 @@ def emotion():
 @app.route("/narrative")
 def narrative():
     idx = empath_index()
-    return jsonify({
-        "index": idx,
-        "summary": build_narrative(idx)
-    })
+    return jsonify({"index": idx, "summary": build_narrative(idx)})
+
+
+# ---------- NEW WITNESS PAGE ----------
+@app.route("/witness")
+def witness():
+    idx = empath_index()
+    summary = build_narrative(idx)
+
+    # map emotion to soft background color
+    if idx < 50:
+        bg = "#0b1a2a"   # deep indigo
+        fg = "#e8f0ff"
+    else:
+        bg = "#1a140b"   # warm dusk amber
+        fg = "#fff6e8"
+
+    html = f"""
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            body {{
+                margin: 0;
+                background: {bg};
+                color: {fg};
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                height: 100vh;
+                text-align: center;
+                padding: 2rem;
+            }}
+            .text {{
+                font-size: 1.4rem;
+                line-height: 1.6;
+                max-width: 32rem;
+                opacity: 0.9;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="text">{summary}</div>
+    </body>
+    </html>
+    """
+
+    return Response(html, mimetype="text/html")
 
 
 @app.route("/")
 def home():
     return "Empath brain running."
 
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
