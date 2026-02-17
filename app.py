@@ -1,23 +1,77 @@
 from flask import Flask, jsonify, Response
+import requests
 import os
 import time
+from statistics import mean
 from collections import deque
 
 app = Flask(__name__)
 
-# --------------------------------------------------
-# Simple in-memory emotional model (stable baseline)
-# --------------------------------------------------
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+NEWS_URL = "https://newsapi.org/v2/top-headlines?language=en&pageSize=10"
+FEAR_GREED_URL = "https://api.alternative.me/fng/"
 
-CACHED_INDEX = 43.0
-CACHED_SUMMARY = "Global emotional tone is cautious and uncertain."
-
-HISTORY = deque(maxlen=12)  # last 12 hourly values
-LAST_UPDATE_HOUR = None
+# ---------- sentiment keywords ----------
+POSITIVE = ["progress", "agreement", "recovery", "breakthrough", "stabilize"]
+NEGATIVE = ["war", "flood", "crisis", "displace", "violence", "collapse", "fear"]
 
 
-def get_hour():
-    return int(time.time() // 3600)
+def score_text(text):
+    score = 50
+    t = text.lower()
+
+    for w in POSITIVE:
+        if w in t:
+            score += 10
+    for w in NEGATIVE:
+        if w in t:
+            score -= 10
+
+    return max(0, min(100, score))
+
+
+# ---------- data sources ----------
+def get_fear_greed():
+    try:
+        r = requests.get(FEAR_GREED_URL, timeout=5)
+        return float(r.json()["data"][0]["value"])
+    except Exception:
+        return 50.0
+
+
+def get_headlines():
+    if not NEWS_API_KEY:
+        return []
+
+    try:
+        r = requests.get(
+            NEWS_URL,
+            headers={"Authorization": NEWS_API_KEY},
+            timeout=5,
+        )
+        data = r.json()
+        return [a["title"] for a in data.get("articles", []) if a.get("title")]
+    except Exception:
+        return []
+
+
+# ---------- emotional index ----------
+def compute_index(headlines):
+    structural = get_fear_greed()
+
+    if headlines:
+        narrative_scores = [score_text(h) for h in headlines]
+        narrative = mean(narrative_scores)
+    else:
+        narrative = 50
+
+    expressive = narrative
+
+    return round(0.15 * structural + 0.30 * narrative + 0.55 * expressive, 2)
+
+
+# ---------- trend memory ----------
+HISTORY = deque(maxlen=12)  # last 12 hours
 
 
 def detect_trend():
@@ -39,6 +93,43 @@ def detect_trend():
     return ""
 
 
+# ---------- narrative builder ----------
+def build_narrative(index, headlines):
+    # sentence 1 — tone + trend
+    if index < 35:
+        tone = "Global emotional tone is heavy and subdued"
+    elif index < 55:
+        tone = "Global emotional tone is cautious and uncertain"
+    elif index < 70:
+        tone = "Global emotional tone is steady with guarded optimism"
+    else:
+        tone = "Global emotional tone is broadly optimistic"
+
+    trend = detect_trend()
+    if trend:
+        tone += f", {trend}"
+
+    # sentence 2 — real-world drivers
+    if not headlines:
+        cause = "Signals remain diffuse, without a single dominant global event."
+    else:
+        ranked = sorted(headlines, key=lambda h: abs(score_text(h) - 50), reverse=True)
+        selected = ranked[:2]
+        cause = "Key drivers include: " + "; ".join(selected) + "."
+
+    return f"{tone}. {cause}"
+
+
+# ---------- hourly cache ----------
+LAST_UPDATE_HOUR = None
+CACHED_INDEX = 50.0
+CACHED_SUMMARY = "Initializing global emotional state."
+
+
+def get_hour():
+    return int(time.time() // 3600)
+
+
 def refresh_if_needed():
     global LAST_UPDATE_HOUR, CACHED_INDEX, CACHED_SUMMARY
 
@@ -46,39 +137,29 @@ def refresh_if_needed():
     if LAST_UPDATE_HOUR == current_hour:
         return
 
-    # --- simulated gentle drift for stability ---
-    import random
-    drift = random.uniform(-1.5, 1.5)
-    new_index = max(0, min(100, CACHED_INDEX + drift))
+    headlines = get_headlines()
+    new_index = compute_index(headlines)
 
     HISTORY.append(new_index)
 
-    if abs(new_index - CACHED_INDEX) >= 1:
-        CACHED_INDEX = round(new_index, 2)
-
-        tone = "Global emotional tone is cautious and uncertain"
-        trend = detect_trend()
-        if trend:
-            tone += f", {trend}"
-
-        CACHED_SUMMARY = tone + "."
+    # meaningful but calm update threshold
+    if abs(new_index - CACHED_INDEX) >= 2:
+        CACHED_INDEX = new_index
+        CACHED_SUMMARY = build_narrative(new_index, headlines)
 
     LAST_UPDATE_HOUR = current_hour
 
 
-# --------------------------------------------------
-# Routes
-# --------------------------------------------------
-
+# ---------- routes ----------
 @app.route("/")
 def home():
-    return "Empath-Brain is running."
+    return "Empath brain running."
 
 
 @app.route("/emotion")
 def emotion():
     refresh_if_needed()
-    return jsonify({"index": CACHED_INDEX, "summary": CACHED_SUMMARY})
+    return jsonify({"index": CACHED_INDEX})
 
 
 @app.route("/narrative")
@@ -116,7 +197,7 @@ def witness():
             .text {{
                 font-size: 1.4rem;
                 line-height: 1.6;
-                max-width: 32rem;
+                max-width: 34rem;
                 opacity: 0.92;
             }}
         </style>
@@ -130,10 +211,7 @@ def witness():
     return Response(html, mimetype="text/html")
 
 
-# --------------------------------------------------
-# Local run support (ignored by Render)
-# --------------------------------------------------
-
+# ---------- local run ----------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
