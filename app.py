@@ -2,14 +2,13 @@ import requests
 from flask import Flask, jsonify, Response
 from statistics import mean
 import os
+import time
 
 app = Flask(__name__)
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 NEWS_URL = "https://newsapi.org/v2/top-headlines?language=en&pageSize=10"
-
 FEAR_GREED_URL = "https://api.alternative.me/fng/"
-
 
 # ---------- emotional scoring ----------
 POSITIVE = ["progress", "agreement", "recovery", "breakthrough", "stabilize"]
@@ -30,7 +29,7 @@ def score_text(text):
     return max(0, min(100, score))
 
 
-# ---------- live data sources ----------
+# ---------- data sources ----------
 def get_fear_greed():
     try:
         r = requests.get(FEAR_GREED_URL, timeout=5)
@@ -53,7 +52,7 @@ def get_headlines():
 
 
 # ---------- emotional index ----------
-def empath_index(headlines):
+def compute_index(headlines):
     structural = get_fear_greed()
 
     if headlines:
@@ -67,9 +66,8 @@ def empath_index(headlines):
     return round(0.15 * structural + 0.30 * narrative + 0.55 * expressive, 2)
 
 
-# ---------- narrative generation ----------
+# ---------- narrative text ----------
 def build_narrative(index, headlines):
-    # sentence 1 — emotional state
     if index < 35:
         tone = "Global emotional tone is heavy and subdued."
     elif index < 55:
@@ -79,11 +77,9 @@ def build_narrative(index, headlines):
     else:
         tone = "Global emotional tone is broadly optimistic."
 
-    # sentence 2 — causes from real headlines
     if not headlines:
         cause = "Current signals are mixed, with no single dominant event."
     else:
-        # choose two most emotionally strong headlines
         ranked = sorted(headlines, key=lambda h: abs(score_text(h) - 50), reverse=True)
         selected = ranked[:2]
         cause = "Key drivers include: " + "; ".join(selected) + "."
@@ -91,28 +87,54 @@ def build_narrative(index, headlines):
     return f"{tone} {cause}"
 
 
+# ---------- HOURLY MEMORY ----------
+LAST_UPDATE_HOUR = None
+CACHED_INDEX = 50.0
+CACHED_SUMMARY = "Initializing global emotional state."
+
+
+def get_hour():
+    return int(time.time() // 3600)
+
+
+def refresh_if_needed():
+    global LAST_UPDATE_HOUR, CACHED_INDEX, CACHED_SUMMARY
+
+    current_hour = get_hour()
+
+    # Only evaluate once per hour
+    if LAST_UPDATE_HOUR == current_hour:
+        return
+
+    headlines = get_headlines()
+    new_index = compute_index(headlines)
+
+    # Meaningful-change threshold
+    if abs(new_index - CACHED_INDEX) >= 3:
+        CACHED_INDEX = new_index
+        CACHED_SUMMARY = build_narrative(new_index, headlines)
+
+    LAST_UPDATE_HOUR = current_hour
+
+
 # ---------- routes ----------
 @app.route("/emotion")
 def emotion():
-    headlines = get_headlines()
-    idx = empath_index(headlines)
-    return jsonify({"index": idx})
+    refresh_if_needed()
+    return jsonify({"index": CACHED_INDEX})
 
 
 @app.route("/narrative")
 def narrative():
-    headlines = get_headlines()
-    idx = empath_index(headlines)
-    return jsonify({"index": idx, "summary": build_narrative(idx, headlines)})
+    refresh_if_needed()
+    return jsonify({"index": CACHED_INDEX, "summary": CACHED_SUMMARY})
 
 
 @app.route("/witness")
 def witness():
-    headlines = get_headlines()
-    idx = empath_index(headlines)
-    summary = build_narrative(idx, headlines)
+    refresh_if_needed()
 
-    if idx < 50:
+    if CACHED_INDEX < 50:
         bg, fg = "#0b1a2a", "#e8f0ff"
     else:
         bg, fg = "#1a140b", "#fff6e8"
@@ -143,7 +165,7 @@ def witness():
         </style>
     </head>
     <body>
-        <div class="text">{summary}</div>
+        <div class="text">{CACHED_SUMMARY}</div>
     </body>
     </html>
     """
