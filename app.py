@@ -3,6 +3,7 @@ from flask import Flask, jsonify, Response
 from statistics import mean
 import os
 import time
+from collections import deque
 
 app = Flask(__name__)
 
@@ -66,16 +67,44 @@ def compute_index(headlines):
     return round(0.15 * structural + 0.30 * narrative + 0.55 * expressive, 2)
 
 
+# ---------- trend memory ----------
+HISTORY = deque(maxlen=12)  # last 12 hours
+
+
+def detect_trend():
+    if len(HISTORY) < 4:
+        return ""
+
+    short = HISTORY[-1] - HISTORY[-3]   # ~2-3 hours
+    medium = HISTORY[-1] - HISTORY[0]   # ~6-12 hours
+
+    # balanced sensitivity thresholds
+    if abs(short) < 1.5 and abs(medium) < 2:
+        return "holding steady"
+    if short > 1.5 and medium > 2:
+        return "slowly easing"
+    if short < -1.5 and medium < -2:
+        return "gently darkening"
+    if abs(short) > 3:
+        return "after recent instability"
+
+    return ""
+
+
 # ---------- narrative text ----------
 def build_narrative(index, headlines):
     if index < 35:
-        tone = "Global emotional tone is heavy and subdued."
+        tone = "Global emotional tone is heavy and subdued"
     elif index < 55:
-        tone = "Global emotional tone is cautious and uncertain."
+        tone = "Global emotional tone is cautious and uncertain"
     elif index < 70:
-        tone = "Global emotional tone is steady with guarded optimism."
+        tone = "Global emotional tone is steady with guarded optimism"
     else:
-        tone = "Global emotional tone is broadly optimistic."
+        tone = "Global emotional tone is broadly optimistic"
+
+    trend = detect_trend()
+    if trend:
+        tone += f", {trend}"
 
     if not headlines:
         cause = "Current signals are mixed, with no single dominant event."
@@ -84,10 +113,10 @@ def build_narrative(index, headlines):
         selected = ranked[:2]
         cause = "Key drivers include: " + "; ".join(selected) + "."
 
-    return f"{tone} {cause}"
+    return f"{tone}. {cause}"
 
 
-# ---------- HOURLY MEMORY ----------
+# ---------- hourly cache ----------
 LAST_UPDATE_HOUR = None
 CACHED_INDEX = 50.0
 CACHED_SUMMARY = "Initializing global emotional state."
@@ -101,16 +130,16 @@ def refresh_if_needed():
     global LAST_UPDATE_HOUR, CACHED_INDEX, CACHED_SUMMARY
 
     current_hour = get_hour()
-
-    # Only evaluate once per hour
     if LAST_UPDATE_HOUR == current_hour:
         return
 
     headlines = get_headlines()
     new_index = compute_index(headlines)
 
-    # Meaningful-change threshold
-    if abs(new_index - CACHED_INDEX) >= 3:
+    HISTORY.append(new_index)
+
+    # meaningful change threshold
+    if abs(new_index - CACHED_INDEX) >= 2:
         CACHED_INDEX = new_index
         CACHED_SUMMARY = build_narrative(new_index, headlines)
 
