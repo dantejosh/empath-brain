@@ -1,34 +1,12 @@
 import os
 import requests
 from flask import Flask, jsonify
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 app = Flask(__name__)
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-
-
-NEGATIVE = [
-    "war","attack","killed","death","crisis","disaster","explosion",
-    "conflict","strike","collapse","flood","earthquake","shooting",
-    "threat","sanctions"
-]
-
-POSITIVE = [
-    "peace","agreement","growth","recovery","aid","rescue","ceasefire",
-    "progress","breakthrough","expansion","stability"
-]
-
-
-def score(text: str) -> int:
-    t = text.lower()
-    neg = sum(w in t for w in NEGATIVE)
-    pos = sum(w in t for w in POSITIVE)
-
-    if pos > neg:
-        return 1
-    if neg > pos:
-        return -1
-    return 0
+analyzer = SentimentIntensityAnalyzer()
 
 
 def compute_emotion():
@@ -45,17 +23,29 @@ def compute_emotion():
         if not articles:
             return 50.0, "No articles returned."
 
-        scores = [score(a.get("title", "")) for a in articles]
+        scores = []
+
+        for a in articles:
+            title = a.get("title", "")
+            if title:
+                sentiment = analyzer.polarity_scores(title)["compound"]
+                scores.append(sentiment)
+
+        if not scores:
+            return 50.0, "No valid headlines."
+
         avg = sum(scores) / len(scores)
 
+        # convert -1..1 → 0..100
         index = round((avg + 1) * 50, 2)
 
+        # narrative tone
         if index < 40:
-            summary = "Global emotional tone is tense and unstable."
+            summary = "Global emotional tone is tense and negative."
         elif index < 50:
-            summary = "Global emotional tone is cautious and uncertain."
+            summary = "Global emotional tone is cautious and uneasy."
         elif index < 60:
-            summary = "Global emotional tone is mixed but stabilizing."
+            summary = "Global emotional tone is mixed and watchful."
         else:
             summary = "Global emotional tone is hopeful and constructive."
 
