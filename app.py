@@ -1,114 +1,96 @@
-import os
-import threading
-import time
-from datetime import datetime
-
-import requests
 from flask import Flask, jsonify
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import requests
+import os
+import time
 
 app = Flask(__name__)
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-analyzer = SentimentIntensityAnalyzer()
 
-CURRENT_INDEX = 50.0
-CURRENT_SUMMARY = "Initializing global emotional state..."
-LAST_UPDATE = None
-background_started = False
-
-FETCH_INTERVAL = 600
-FETCH_TIMEOUT = 5
+# ---- simple in-memory state (safe on Render) ----
+CACHE_DURATION = 300  # 5 minutes
+last_fetch_time = 0
+last_index = 43  # stable non-50 starting point
 
 
-def fetch_emotion_once():
-    global CURRENT_INDEX, CURRENT_SUMMARY, LAST_UPDATE
+def fetch_raw_emotion():
+    """Pull headlines and compute weighted keyword score."""
+    url = "https://newsapi.org/v2/top-headlines"
+    params = {
+        "language": "en",
+        "pageSize": 20,
+        "apiKey": NEWS_API_KEY,
+    }
 
-    if not NEWS_API_KEY:
-        CURRENT_SUMMARY = "Missing NEWS_API_KEY."
-        return
+    r = requests.get(url, params=params, timeout=5)
+    data = r.json()
+    headlines = [a["title"].lower() for a in data.get("articles", [])]
+
+    positive_words = ["growth", "peace", "win", "hope", "success", "recover", "recovery"]
+    strong_negative = ["war", "attack", "death", "crisis", "disaster"]
+    mild_negative = ["fear", "loss", "conflict", "tension"]
+
+    score = 0
+
+    for h in headlines:
+        if any(w in h for w in positive_words):
+            score += 1
+        if any(w in h for w in strong_negative):
+            score -= 2
+        elif any(w in h for w in mild_negative):
+            score -= 1
+
+    # Center near mid-40s
+    raw_index = max(0, min(100, 45 + score))
+    return raw_index
+
+
+def compute_emotion():
+    """
+    Cached + smoothed emotion computation.
+    Still fully synchronous and safe.
+    """
+    global last_fetch_time, last_index
+
+    now = time.time()
+
+    # Use cache if within 5 minutes
+    if now - last_fetch_time < CACHE_DURATION:
+        return last_index
 
     try:
-        url = "https://newsapi.org/v2/top-headlines"
-        params = {"language": "en", "pageSize": 50, "apiKey": NEWS_API_KEY}
+        raw_index = fetch_raw_emotion()
 
-        r = requests.get(url, params=params, timeout=FETCH_TIMEOUT)
-        articles = r.json().get("articles", [])
+        # ---- temporal smoothing ----
+        smoothed = int(0.7 * last_index + 0.3 * raw_index)
 
-        if not articles:
-            CURRENT_SUMMARY = "No articles returned."
-            return
+        last_index = smoothed
+        last_fetch_time = now
 
-        scores = [
-            analyzer.polarity_scores(a.get("title", ""))["compound"]
-            for a in articles if a.get("title")
-        ]
+        return smoothed
 
-        if not scores:
-            CURRENT_SUMMARY = "No valid headlines."
-            return
-
-        avg = sum(scores) / len(scores)
-        CURRENT_INDEX = round((avg + 1) * 50, 2)
-
-        if CURRENT_INDEX < 40:
-            CURRENT_SUMMARY = "Global emotional tone is tense and negative."
-        elif CURRENT_INDEX < 50:
-            CURRENT_SUMMARY = "Global emotional tone is cautious and uneasy."
-        elif CURRENT_INDEX < 60:
-            CURRENT_SUMMARY = "Global emotional tone is mixed and watchful."
-        else:
-            CURRENT_SUMMARY = "Global emotional tone is hopeful and constructive."
-
-        LAST_UPDATE = datetime.utcnow().isoformat()
-
-    except Exception as e:
-        CURRENT_SUMMARY = f"Fetch error: {str(e)}"
-
-
-def background_fetch_loop():
-    while True:
-        fetch_emotion_once()
-        time.sleep(FETCH_INTERVAL)
-
-
-def start_background_thread():
-    thread = threading.Thread(target=background_fetch_loop, daemon=True)
-    thread.start()
-
-
-@app.before_request
-def activate_background_fetch():
-    global background_started
-    if not background_started:
-        start_background_thread()
-        background_started = True
-
-
-@app.route("/")
-def root():
-    return "Empath-Brain live."
+    except Exception:
+        # fallback keeps sculpture alive
+        return last_index
 
 
 @app.route("/emotion")
 def emotion():
+    index = compute_emotion()
+
+    if index < 40:
+        summary = "Global emotional tone is tense and uncertain."
+    elif index < 60:
+        summary = "Global emotional tone is cautious and uncertain."
+    else:
+        summary = "Global emotional tone is stable with cautious optimism."
+
     return jsonify({
-        "index": CURRENT_INDEX,
-        "summary": CURRENT_SUMMARY,
-        "last_update": LAST_UPDATE
+        "index": index,
+        "summary": summary
     })
 
 
-@app.route("/narrative")
-def narrative():
-    return jsonify({"text": CURRENT_SUMMARY})
-
-
-@app.route("/witness")
-def witness():
-    return jsonify({"message": CURRENT_SUMMARY})
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+@app.route("/")
+def home():
+    return "Emotion server running."
