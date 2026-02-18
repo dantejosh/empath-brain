@@ -1,11 +1,15 @@
 import threading
 import time
 from datetime import datetime
-import random
+import os
+import requests
 
 from flask import Flask, jsonify
 
 app = Flask(__name__)
+
+# ---------- CONFIG ----------
+NEWS_API_KEY = os.getenv("67ec45cddcf64dad9a84c9aea7ada174")
 
 # ---------- GLOBAL STATE ----------
 CURRENT_INDEX = 50.0
@@ -13,29 +17,79 @@ CURRENT_SUMMARY = "Initializing global emotional state..."
 LAST_UPDATE = None
 
 
-# ---------- EMOTION ENGINE ----------
+# ---------- SENTIMENT HELPERS ----------
+NEGATIVE_WORDS = [
+    "war", "attack", "killed", "death", "crisis", "disaster",
+    "explosion", "conflict", "strike", "collapse", "flood",
+    "earthquake", "shooting", "threat", "sanctions"
+]
+
+POSITIVE_WORDS = [
+    "peace", "agreement", "growth", "recovery", "aid",
+    "rescue", "ceasefire", "progress", "breakthrough",
+    "expansion", "stability"
+]
+
+
+def score_headline(text: str) -> int:
+    """Return sentiment score from -1 to +1."""
+    t = text.lower()
+
+    neg = sum(word in t for word in NEGATIVE_WORDS)
+    pos = sum(word in t for word in POSITIVE_WORDS)
+
+    if pos > neg:
+        return 1
+    if neg > pos:
+        return -1
+    return 0
+
+
+# ---------- REAL EMOTION ENGINE ----------
 def compute_global_emotion():
-    """
-    Placeholder emotion computation.
-    Replace later with real news / sentiment sources.
-    """
+    if not NEWS_API_KEY:
+        raise Exception("Missing NEWS_API_KEY")
 
-    # simulate real-world fluctuation
-    index = round(random.uniform(35, 65), 2)
+    url = "https://newsapi.org/v2/top-headlines"
+    params = {
+        "language": "en",
+        "pageSize": 50,
+        "apiKey": NEWS_API_KEY
+    }
 
+    r = requests.get(url, params=params, timeout=10)
+    data = r.json()
+
+    articles = data.get("articles", [])
+
+    if not articles:
+        raise Exception("No news articles returned")
+
+    scores = []
+
+    for a in articles:
+        title = a.get("title") or ""
+        scores.append(score_headline(title))
+
+    avg = sum(scores) / len(scores)
+
+    # convert -1..1 → 0..100
+    index = round((avg + 1) * 50, 2)
+
+    # narrative
     if index < 40:
         summary = "Global emotional tone is tense and unstable."
     elif index < 50:
         summary = "Global emotional tone is cautious and uncertain."
     elif index < 60:
-        summary = "Global emotional tone is balanced with mixed signals."
+        summary = "Global emotional tone is mixed but stabilizing."
     else:
-        summary = "Global emotional tone is optimistic and forward-leaning."
+        summary = "Global emotional tone is hopeful and constructive."
 
     return index, summary
 
 
-# ---------- BACKGROUND UPDATER ----------
+# ---------- BACKGROUND LOOP ----------
 def emotion_updater():
     global CURRENT_INDEX, CURRENT_SUMMARY, LAST_UPDATE
 
@@ -52,11 +106,11 @@ def emotion_updater():
         except Exception as e:
             print("Update error:", e)
 
-        # wait 1 hour before next update
-        time.sleep(3600)
+        # update every 30 minutes
+        time.sleep(1800)
 
 
-# ---------- STARTUP: RUN FIRST UPDATE IMMEDIATELY ----------
+# ---------- INITIAL RUN ----------
 def initialize_emotion():
     global CURRENT_INDEX, CURRENT_SUMMARY, LAST_UPDATE
 
@@ -91,16 +145,12 @@ def emotion():
 
 @app.route("/narrative")
 def narrative():
-    return jsonify({
-        "text": CURRENT_SUMMARY
-    })
+    return jsonify({"text": CURRENT_SUMMARY})
 
 
 @app.route("/witness")
 def witness():
-    return jsonify({
-        "message": CURRENT_SUMMARY
-    })
+    return jsonify({"message": CURRENT_SUMMARY})
 
 
 # ---------- RUN ----------
