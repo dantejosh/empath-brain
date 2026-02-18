@@ -1,20 +1,10 @@
 import os
-import threading
-import time
-from datetime import datetime
-
 import requests
 from flask import Flask, jsonify
 
 app = Flask(__name__)
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-
-CURRENT_INDEX = 50.0
-CURRENT_SUMMARY = "Initializing global emotional state..."
-LAST_UPDATE = None
-
-updater_started = False
 
 
 NEGATIVE = [
@@ -43,62 +33,36 @@ def score(text: str) -> int:
 
 def compute_emotion():
     if not NEWS_API_KEY:
-        raise Exception("Missing NEWS_API_KEY")
+        return 50.0, "Missing NEWS_API_KEY."
 
     url = "https://newsapi.org/v2/top-headlines"
     params = {"language": "en", "pageSize": 50, "apiKey": NEWS_API_KEY}
 
-    r = requests.get(url, params=params, timeout=10)
-    data = r.json()
-    articles = data.get("articles", [])
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        articles = r.json().get("articles", [])
 
-    if not articles:
-        raise Exception("No articles returned")
+        if not articles:
+            return 50.0, "No articles returned."
 
-    scores = [score(a.get("title", "")) for a in articles]
-    avg = sum(scores) / len(scores)
+        scores = [score(a.get("title", "")) for a in articles]
+        avg = sum(scores) / len(scores)
 
-    index = round((avg + 1) * 50, 2)
+        index = round((avg + 1) * 50, 2)
 
-    if index < 40:
-        summary = "Global emotional tone is tense and unstable."
-    elif index < 50:
-        summary = "Global emotional tone is cautious and uncertain."
-    elif index < 60:
-        summary = "Global emotional tone is mixed but stabilizing."
-    else:
-        summary = "Global emotional tone is hopeful and constructive."
+        if index < 40:
+            summary = "Global emotional tone is tense and unstable."
+        elif index < 50:
+            summary = "Global emotional tone is cautious and uncertain."
+        elif index < 60:
+            summary = "Global emotional tone is mixed but stabilizing."
+        else:
+            summary = "Global emotional tone is hopeful and constructive."
 
-    return index, summary
+        return index, summary
 
-
-def updater_loop():
-    global CURRENT_INDEX, CURRENT_SUMMARY, LAST_UPDATE
-
-    while True:
-        try:
-            idx, summ = compute_emotion()
-            CURRENT_INDEX = idx
-            CURRENT_SUMMARY = summ
-            LAST_UPDATE = datetime.utcnow().isoformat()
-            print(f"[UPDATE] {LAST_UPDATE} → {idx}")
-        except Exception as e:
-            print("Update error:", e)
-
-        time.sleep(1800)  # 30 minutes
-
-
-@app.before_request
-def start_updater_once():
-    """
-    Start background updater only after server is live.
-    Prevents Render deploy hang.
-    """
-    global updater_started
-    if not updater_started:
-        threading.Thread(target=updater_loop, daemon=True).start()
-        updater_started = True
-        print("[START] Background updater launched")
+    except Exception as e:
+        return 50.0, f"Error: {str(e)}"
 
 
 @app.route("/")
@@ -108,21 +72,23 @@ def root():
 
 @app.route("/emotion")
 def emotion():
+    index, summary = compute_emotion()
     return jsonify({
-        "index": CURRENT_INDEX,
-        "last_update": LAST_UPDATE,
-        "summary": CURRENT_SUMMARY
+        "index": index,
+        "summary": summary
     })
 
 
 @app.route("/narrative")
 def narrative():
-    return jsonify({"text": CURRENT_SUMMARY})
+    index, summary = compute_emotion()
+    return jsonify({"text": summary})
 
 
 @app.route("/witness")
 def witness():
-    return jsonify({"message": CURRENT_SUMMARY})
+    index, summary = compute_emotion()
+    return jsonify({"message": summary})
 
 
 if __name__ == "__main__":
