@@ -1,94 +1,41 @@
-from flask import Flask, jsonify, Response
-import requests
-import statistics
 import threading
 import time
 from datetime import datetime
+import random
+
+from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-# ---------- Global emotional state ----------
-
+# ---------- GLOBAL STATE ----------
 CURRENT_INDEX = 50.0
 CURRENT_SUMMARY = "Initializing global emotional state..."
 LAST_UPDATE = None
 
 
-# ---------- Data Sources ----------
-
-def get_market_sentiment():
-    try:
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?range=1d&interval=5m"
-        r = requests.get(url, timeout=10)
-        data = r.json()
-
-        closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
-        closes = [c for c in closes if c is not None]
-
-        if len(closes) < 2:
-            return 50.0
-
-        change_pct = ((closes[-1] - closes[0]) / closes[0]) * 100
-        index = max(0, min(100, 50 + (change_pct * 25)))
-
-        return round(index, 2)
-
-    except Exception:
-        return 50.0
-
-
-def get_news_sentiment():
-    try:
-        url = "https://hnrss.org/frontpage.jsonfeed"
-        r = requests.get(url, timeout=10)
-        items = r.json().get("items", [])[:20]
-
-        lengths = [len(item.get("title", "")) for item in items]
-        if not lengths:
-            return 50.0
-
-        volatility = statistics.pstdev(lengths)
-        index = max(0, min(100, 50 + (volatility - 20)))
-
-        return round(index, 2)
-
-    except Exception:
-        return 50.0
-
-
-# ---------- Emotion Engine ----------
-
-def build_summary(index, market, news):
-    if index < 35:
-        tone = "heavy and pessimistic"
-    elif index < 45:
-        tone = "cautious and uncertain"
-    elif index < 60:
-        tone = "balanced with mixed signals"
-    elif index < 75:
-        tone = "guardedly optimistic"
-    else:
-        tone = "strongly positive and confident"
-
-    return (
-        f"Global emotional tone is {tone}. "
-        f"Market signal: {market:.1f}. "
-        f"News tension signal: {news:.1f}."
-    )
-
-
+# ---------- EMOTION ENGINE ----------
 def compute_global_emotion():
-    market = get_market_sentiment()
-    news = get_news_sentiment()
+    """
+    Placeholder emotion computation.
+    Replace later with real news / sentiment sources.
+    """
 
-    blended = (market * 0.6) + (news * 0.4)
-    summary = build_summary(blended, market, news)
+    # simulate real-world fluctuation
+    index = round(random.uniform(35, 65), 2)
 
-    return round(blended, 2), summary
+    if index < 40:
+        summary = "Global emotional tone is tense and unstable."
+    elif index < 50:
+        summary = "Global emotional tone is cautious and uncertain."
+    elif index < 60:
+        summary = "Global emotional tone is balanced with mixed signals."
+    else:
+        summary = "Global emotional tone is optimistic and forward-leaning."
+
+    return index, summary
 
 
-# ---------- Background updater ----------
-
+# ---------- BACKGROUND UPDATER ----------
 def emotion_updater():
     global CURRENT_INDEX, CURRENT_SUMMARY, LAST_UPDATE
 
@@ -105,18 +52,31 @@ def emotion_updater():
         except Exception as e:
             print("Update error:", e)
 
-        # update every hour
+        # wait 1 hour before next update
         time.sleep(3600)
 
 
-# Start background thread once
+# ---------- STARTUP: RUN FIRST UPDATE IMMEDIATELY ----------
+def initialize_emotion():
+    global CURRENT_INDEX, CURRENT_SUMMARY, LAST_UPDATE
+
+    try:
+        index, summary = compute_global_emotion()
+        CURRENT_INDEX = index
+        CURRENT_SUMMARY = summary
+        LAST_UPDATE = datetime.utcnow().isoformat()
+        print(f"[INIT] {LAST_UPDATE} → {index}")
+    except Exception as e:
+        print("Initialization error:", e)
+
+
+initialize_emotion()
 threading.Thread(target=emotion_updater, daemon=True).start()
 
 
-# ---------- Routes ----------
-
+# ---------- ROUTES ----------
 @app.route("/")
-def root():
+def home():
     return "Empath-Brain is running."
 
 
@@ -124,64 +84,25 @@ def root():
 def emotion():
     return jsonify({
         "index": CURRENT_INDEX,
-        "summary": CURRENT_SUMMARY,
-        "last_update": LAST_UPDATE
+        "last_update": LAST_UPDATE,
+        "summary": CURRENT_SUMMARY
     })
 
 
 @app.route("/narrative")
 def narrative():
     return jsonify({
-        "index": CURRENT_INDEX,
-        "summary": CURRENT_SUMMARY,
-        "last_update": LAST_UPDATE
+        "text": CURRENT_SUMMARY
     })
 
 
 @app.route("/witness")
 def witness():
-    html = f"""
-    <html>
-        <head>
-            <meta name="viewport" content="width=device-width, initial-scale=1" />
-            <style>
-                body {{
-                    margin: 0;
-                    background: black;
-                    color: white;
-                    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    height: 100vh;
-                    text-align: center;
-                    padding: 40px;
-                    font-size: 22px;
-                    line-height: 1.5;
-                }}
-                .meta {{
-                    margin-top: 20px;
-                    font-size: 16px;
-                    opacity: 0.6;
-                }}
-            </style>
-        </head>
-        <body>
-            <div>
-                {CURRENT_SUMMARY}
-                <div class="meta">
-                    Index: {CURRENT_INDEX}<br/>
-                    Updated: {LAST_UPDATE}
-                </div>
-            </div>
-        </body>
-    </html>
-    """
-
-    return Response(html, mimetype="text/html")
+    return jsonify({
+        "message": CURRENT_SUMMARY
+    })
 
 
-# ---------- Run ----------
-
+# ---------- RUN ----------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
