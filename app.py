@@ -1,17 +1,22 @@
 from flask import Flask, jsonify, Response
 import requests
 import statistics
+import threading
 import time
+from datetime import datetime
 
 app = Flask(__name__)
 
-# ---------- Helpers ----------
+# ---------- Global emotional state ----------
+
+CURRENT_INDEX = 50.0
+CURRENT_SUMMARY = "Initializing global emotional state..."
+LAST_UPDATE = None
+
+
+# ---------- Data Sources ----------
 
 def get_market_sentiment():
-    """
-    Pull recent S&P 500 data from Yahoo Finance.
-    Convert % daily change into 0–100 emotion scale.
-    """
     try:
         url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?range=1d&interval=5m"
         r = requests.get(url, timeout=10)
@@ -24,9 +29,8 @@ def get_market_sentiment():
             return 50.0
 
         change_pct = ((closes[-1] - closes[0]) / closes[0]) * 100
-
-        # Map −2% → 0, 0% → 50, +2% → 100 (clamped)
         index = max(0, min(100, 50 + (change_pct * 25)))
+
         return round(index, 2)
 
     except Exception:
@@ -34,12 +38,6 @@ def get_market_sentiment():
 
 
 def get_news_sentiment():
-    """
-    Very lightweight proxy:
-    Pull top headlines count from a public RSS JSON mirror.
-    Use volatility of headline lengths as emotional tension proxy.
-    (Simple but effective for motion.)
-    """
     try:
         url = "https://hnrss.org/frontpage.jsonfeed"
         r = requests.get(url, timeout=10)
@@ -50,34 +48,17 @@ def get_news_sentiment():
             return 50.0
 
         volatility = statistics.pstdev(lengths)
-
-        # Map volatility ~10–40 → 30–70
         index = max(0, min(100, 50 + (volatility - 20)))
+
         return round(index, 2)
 
     except Exception:
         return 50.0
 
 
-def compute_global_emotion():
-    """
-    Blend market + news.
-    Market weighted slightly higher for stability.
-    """
-    market = get_market_sentiment()
-    news = get_news_sentiment()
-
-    blended = (market * 0.6) + (news * 0.4)
-
-    summary = build_summary(blended, market, news)
-
-    return round(blended, 2), summary
-
+# ---------- Emotion Engine ----------
 
 def build_summary(index, market, news):
-    """
-    Human-readable narrative.
-    """
     if index < 35:
         tone = "heavy and pessimistic"
     elif index < 45:
@@ -96,6 +77,42 @@ def build_summary(index, market, news):
     )
 
 
+def compute_global_emotion():
+    market = get_market_sentiment()
+    news = get_news_sentiment()
+
+    blended = (market * 0.6) + (news * 0.4)
+    summary = build_summary(blended, market, news)
+
+    return round(blended, 2), summary
+
+
+# ---------- Background updater ----------
+
+def emotion_updater():
+    global CURRENT_INDEX, CURRENT_SUMMARY, LAST_UPDATE
+
+    while True:
+        try:
+            index, summary = compute_global_emotion()
+
+            CURRENT_INDEX = index
+            CURRENT_SUMMARY = summary
+            LAST_UPDATE = datetime.utcnow().isoformat()
+
+            print(f"[UPDATE] {LAST_UPDATE} → {index}")
+
+        except Exception as e:
+            print("Update error:", e)
+
+        # update every hour
+        time.sleep(3600)
+
+
+# Start background thread once
+threading.Thread(target=emotion_updater, daemon=True).start()
+
+
 # ---------- Routes ----------
 
 @app.route("/")
@@ -105,20 +122,24 @@ def root():
 
 @app.route("/emotion")
 def emotion():
-    index, summary = compute_global_emotion()
-    return jsonify({"index": index, "summary": summary})
+    return jsonify({
+        "index": CURRENT_INDEX,
+        "summary": CURRENT_SUMMARY,
+        "last_update": LAST_UPDATE
+    })
 
 
 @app.route("/narrative")
 def narrative():
-    index, summary = compute_global_emotion()
-    return jsonify({"index": index, "summary": summary})
+    return jsonify({
+        "index": CURRENT_INDEX,
+        "summary": CURRENT_SUMMARY,
+        "last_update": LAST_UPDATE
+    })
 
 
 @app.route("/witness")
 def witness():
-    index, summary = compute_global_emotion()
-
     html = f"""
     <html>
         <head>
@@ -138,17 +159,20 @@ def witness():
                     font-size: 22px;
                     line-height: 1.5;
                 }}
-                .index {{
+                .meta {{
                     margin-top: 20px;
-                    font-size: 18px;
+                    font-size: 16px;
                     opacity: 0.6;
                 }}
             </style>
         </head>
         <body>
             <div>
-                {summary}
-                <div class="index">Index: {index}</div>
+                {CURRENT_SUMMARY}
+                <div class="meta">
+                    Index: {CURRENT_INDEX}<br/>
+                    Updated: {LAST_UPDATE}
+                </div>
             </div>
         </body>
     </html>
