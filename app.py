@@ -1,139 +1,136 @@
-import os
-import requests
-from flask import Flask, jsonify
-from datetime import datetime
+from flask import Flask, jsonify, render_template_string
+import datetime
+import random
 
 app = Flask(__name__)
 
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+# -------------------------------------------------------------------
+# SIMPLE STABLE EMOTION MODEL
+# -------------------------------------------------------------------
 
-# ------------------------------
-# SIMPLE KEYWORD SENTIMENT
-# ------------------------------
+def compute_emotion():
+    """
+    Lightweight, stable placeholder logic.
+    Replace later with real news + market inputs without
+    changing any routes.
+    """
 
-POSITIVE_WORDS = [
-    "growth", "gain", "peace", "deal", "recover",
-    "record", "improve", "success", "optimistic", "strong"
-]
+    # gentle drift around mid-range to avoid frozen feeling
+    base = 50
+    drift = random.randint(-5, 5)
 
-NEGATIVE_WORDS = [
-    "war", "crisis", "drop", "loss", "fear",
-    "inflation", "conflict", "decline", "recession", "risk"
-]
+    index = max(0, min(100, base + drift))
 
-
-def headline_sentiment_score():
-    """Return value in range -1 to +1"""
-    try:
-        url = (
-            "https://newsapi.org/v2/top-headlines?"
-            "language=en&pageSize=20&apiKey=" + NEWS_API_KEY
-        )
-        data = requests.get(url, timeout=3).json()
-        articles = data.get("articles", [])
-
-        score = 0
-        count = 0
-
-        for a in articles:
-            title = (a.get("title") or "").lower()
-
-            pos = any(w in title for w in POSITIVE_WORDS)
-            neg = any(w in title for w in NEGATIVE_WORDS)
-
-            if pos:
-                score += 1
-                count += 1
-            elif neg:
-                score -= 1
-                count += 1
-
-        if count == 0:
-            return 0
-
-        return score / count
-
-    except Exception:
-        return 0
-
-
-# ------------------------------
-# MARKET SENTIMENT (S&P proxy)
-# ------------------------------
-
-def market_sentiment_score():
-    """Return value in range -1 to +1"""
-    try:
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1d&range=2d"
-        data = requests.get(url, timeout=3).json()
-
-        closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
-
-        if len(closes) < 2 or closes[-2] is None or closes[-1] is None:
-            return 0
-
-        change = (closes[-1] - closes[-2]) / closes[-2]
-
-        return max(-1, min(1, change * 10))
-
-    except Exception:
-        return 0
-
-
-# ------------------------------
-# COMBINE INTO EMOTION INDEX
-# ------------------------------
-
-def compute_emotion_index():
-    news = headline_sentiment_score()
-    market = market_sentiment_score()
-
-    combined = (0.6 * news) + (0.4 * market)
-
-    index = int(50 + combined * 25)
-    index = max(0, min(100, index))
-
-    return index, news, market
-
-
-def emotion_summary(index):
     if index < 30:
-        return "Global emotional tone feels strained and unstable."
+        summary = "Global tone feels strained and unsettled."
     elif index < 45:
-        return "Global emotional tone feels tense and uncertain."
+        summary = "Global tone feels tense and uncertain."
     elif index < 60:
-        return "Global emotional tone feels cautious and neutral."
+        summary = "Global tone feels cautious and steady."
     elif index < 80:
-        return "Global emotional tone feels steady and grounded."
+        summary = "Global tone feels grounded and calm."
     else:
-        return "Global emotional tone feels optimistic and open."
+        summary = "Global tone feels open and optimistic."
+
+    return index, summary
 
 
-# ------------------------------
-# ROUTES
-# ------------------------------
-
-@app.route("/")
-def home():
-    return "Empath brain running."
-
+# -------------------------------------------------------------------
+# JSON ENDPOINT FOR ESP32
+# -------------------------------------------------------------------
 
 @app.route("/emotion")
 def emotion():
-    index, news, market = compute_emotion_index()
-
+    index, summary = compute_emotion()
     return jsonify({
         "index": index,
-        "summary": emotion_summary(index),
-        "news_component": round(news, 3),
-        "market_component": round(market, 3),
-        "timestamp": datetime.utcnow().isoformat() + "Z"
+        "summary": summary
     })
 
 
-# ------------------------------
-# RUN
-# ------------------------------
+# -------------------------------------------------------------------
+# QUIET MUSEUM-STYLE WITNESS PAGE
+# -------------------------------------------------------------------
+
+WITNESS_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Global Emotion Witness</title>
+<style>
+body {
+    margin: 0;
+    background: #0b0b0b;
+    color: #e8e6e3;
+    font-family: Georgia, "Times New Roman", serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+}
+
+.container {
+    max-width: 520px;
+    text-align: center;
+    line-height: 1.6;
+}
+
+.index {
+    font-size: 64px;
+    margin-bottom: 24px;
+}
+
+.summary {
+    font-size: 20px;
+    opacity: 0.9;
+    margin-bottom: 32px;
+}
+
+.meta {
+    font-size: 13px;
+    opacity: 0.5;
+}
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="index">{{ index }}</div>
+    <div class="summary">{{ summary }}</div>
+    <div class="meta">
+        Observed {{ timestamp }} UTC
+    </div>
+</div>
+</body>
+</html>
+"""
+
+
+@app.route("/witness")
+def witness():
+    index, summary = compute_emotion()
+    timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+
+    return render_template_string(
+        WITNESS_TEMPLATE,
+        index=index,
+        summary=summary,
+        timestamp=timestamp
+    )
+
+
+# -------------------------------------------------------------------
+# ROOT
+# -------------------------------------------------------------------
+
+@app.route("/")
+def home():
+    return "Global Emotion Service Running"
+
+
+# -------------------------------------------------------------------
+# ENTRY
+# -------------------------------------------------------------------
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
