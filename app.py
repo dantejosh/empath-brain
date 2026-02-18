@@ -1,137 +1,146 @@
-from flask import Flask, jsonify
-import requests
 import os
-import time
+import requests
+from flask import Flask, jsonify
+from datetime import datetime
 
 app = Flask(__name__)
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-MARKET_API_KEY = os.getenv("MARKET_API_KEY")
+MARKET_API_KEY = os.getenv("MARKET_API_KEY")  # optional (works without it)
 
-CACHE_DURATION = 300
-last_fetch_time = 0
-last_index = 43
+# --------------------------------------------------
+# SIMPLE KEYWORD SENTIMENT (no NLP, deterministic)
+# --------------------------------------------------
+
+POSITIVE_WORDS = [
+    "growth", "gain", "peace", "deal", "recover", "record",
+    "improve", "success", "optimistic", "strong"
+]
+
+NEGATIVE_WORDS = [
+    "war", "crisis", "drop", "loss", "fear", "inflation",
+    "conflict", "decline", "recession", "risk"
+]
 
 
-def fetch_news_score():
-    url = "https://newsapi.org/v2/top-headlines"
-    params = {
-        "language": "en",
-        "pageSize": 20,
-        "apiKey": NEWS_API_KEY,
-    }
-
+def headline_sentiment_score():
+    """Return value in range -1 → +1"""
     try:
-        r = requests.get(url, params=params, timeout=3)
-        data = r.json()
-        headlines = [a["title"].lower() for a in data.get("articles", [])]
-
-        positive = ["growth", "peace", "win", "hope", "success", "recovery"]
-        strong_negative = ["war", "attack", "death", "crisis", "disaster"]
-        mild_negative = ["fear", "loss", "conflict", "tension"]
+        url = (
+            "https://newsapi.org/v2/top-headlines?"
+            "language=en&pageSize=20&apiKey=" + NEWS_API_KEY
+        )
+        data = requests.get(url, timeout=3).json()
+        articles = data.get("articles", [])
 
         score = 0
+        count = 0
 
-        for h in headlines:
-            if any(w in h for w in positive):
+        for a in articles:
+            title = (a.get("title") or "").lower()
+
+            pos = any(w in title for w in POSITIVE_WORDS)
+            neg = any(w in title for w in NEGATIVE_WORDS)
+
+            if pos:
                 score += 1
-            if any(w in h for w in strong_negative):
-                score -= 2
-            elif any(w in h for w in mild_negative):
+                count += 1
+            elif neg:
                 score -= 1
+                count += 1
 
-        return score
-
-    except Exception:
-        return 0
-
-
-def fetch_market_score():
-    if not MARKET_API_KEY:
-        return 0
-
-    try:
-        url = "https://www.alphavantage.co/query"
-        params = {
-            "function": "GLOBAL_QUOTE",
-            "symbol": "SPY",
-            "apikey": MARKET_API_KEY,
-        }
-
-        r = requests.get(url, params=params, timeout=3)
-        data = r.json()
-
-        change_pct = float(
-            data["Global Quote"]["10. change percent"].replace("%", "")
-        )
-
-        if change_pct > 1:
-            return 3
-        elif change_pct > 0.2:
-            return 1
-        elif change_pct < -1:
-            return -3
-        elif change_pct < -0.2:
-            return -1
-        else:
+        if count == 0:
             return 0
 
+        return score / count
+
     except Exception:
         return 0
 
 
-def compute_emotion():
-    global last_fetch_time, last_index
+# --------------------------------------------------
+# MARKET MOOD (simple daily % change proxy)
+# --------------------------------------------------
 
-    now = time.time()
-
-    # Always return cached value instantly if still fresh
-    if now - last_fetch_time < CACHE_DURATION:
-        return last_index
-
-    news_score = 0
-    market_score = 0
-
-    # Safe news fetch
+def market_sentiment_score():
+    """Return value in range -1 → +1"""
     try:
-        news_score = fetch_news_score()
+        # Free demo endpoint (no key required)
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1d&range=2d"
+        data = requests.get(url, timeout=3).json()
+
+        closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+
+        if len(closes) < 2 or closes[-2] is None or closes[-1] is None:
+            return 0
+
+        change = (closes[-1] - closes[-2]) / closes[-2]
+
+        # Clamp to reasonable emotional range
+        return max(-1, min(1, change * 10))
+
     except Exception:
-        news_score = 0
+        return 0
 
-    # Safe market fetch
-    try:
-        market_score = fetch_market_score()
-    except Exception:
-        market_score = 0
 
-    raw_index = max(0, min(100, 45 + news_score + market_score))
+# --------------------------------------------------
+# COMBINE INTO EMOTION INDEX
+# --------------------------------------------------
 
-    # Smooth transition
-    smoothed = int(0.7 * last_index + 0.3 * raw_index)
+def compute_emotion_index():
+    news = headline_sentiment_score()
+    market = market_sentiment_score()
 
-    last_index = smoothed
-    last_fetch_time = now
+    # Weighted blend (news slightly stronger)
+    combined = (0.6 * news) + (0.4 * market)
 
-    return smoothed
+    # Map -1..1 → 0..100
+    index = int(50 + combined * 25)
+
+    # Clamp
+    index = max(0, min(100, index))
+
+    return index, news, market
+
+
+def emotion_summary(index):
+    if index < 30:
+        return "Global emotional tone feels strained and unstable."
+    elif index < 45:
+        return "Global emotional tone feels tense and uncertain."
+    elif index < 60:
+        return "Global emotional tone feels cautious and neutral."
+    elif index < 80:
+        return "Global emotional tone feels steady and grounded."
+    else:
+        return "Global emotional tone feels optimistic and open."
+
+
+# --------------------------------------------------
+# ROUTES
+# --------------------------------------------------
+
+@app.route("/")
+def home():
+    return "Empath brain running."
 
 
 @app.route("/emotion")
 def emotion():
-    index = compute_emotion()
-
-    if index < 40:
-        summary = "Global emotional tone is tense and uncertain."
-    elif index < 60:
-        summary = "Global emotional tone is cautious and uncertain."
-    else:
-        summary = "Global emotional tone is stable with cautious optimism."
+    index, news, market = compute_emotion_index()
 
     return jsonify({
         "index": index,
-        "summary": summary
+        "summary": emotion_summary(index),
+        "news_component": round(news, 3),
+        "market_component": round(market, 3),
+        "timestamp": datetime.utcnow().isoformat() + "Z"
     })
 
 
-@app.route("/")
-def home():
-    return "Emotion server running."
+# --------------------------------------------------
+# RUN
+# --------------------------------------------------
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
