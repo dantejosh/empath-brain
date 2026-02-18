@@ -68,7 +68,7 @@ int fetchEmotion() {
 
 
 // ------------------------------------------------
-// Map index → emotional parameters
+# Map index → emotional parameters
 // ------------------------------------------------
 void mapEmotion(int index) {
 
@@ -195,3 +195,4 @@ void loop() {
 
   delay(16); // ~60 FPS
 }
+
