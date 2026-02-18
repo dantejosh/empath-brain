@@ -1,65 +1,131 @@
 import os
+import threading
+import time
+from datetime import datetime
+
 import requests
 from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-# Read environment variable correctly
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+
+CURRENT_INDEX = 50.0
+CURRENT_SUMMARY = "Initializing global emotional state..."
+LAST_UPDATE = None
+
+
+NEGATIVE = [
+    "war","attack","killed","death","crisis","disaster","explosion",
+    "conflict","strike","collapse","flood","earthquake","shooting",
+    "threat","sanctions"
+]
+
+POSITIVE = [
+    "peace","agreement","growth","recovery","aid","rescue","ceasefire",
+    "progress","breakthrough","expansion","stability"
+]
+
+
+def score(text: str) -> int:
+    t = text.lower()
+    neg = sum(w in t for w in NEGATIVE)
+    pos = sum(w in t for w in POSITIVE)
+
+    if pos > neg:
+        return 1
+    if neg > pos:
+        return -1
+    return 0
+
+
+def compute_emotion():
+    if not NEWS_API_KEY:
+        raise Exception("Missing NEWS_API_KEY")
+
+    url = "https://newsapi.org/v2/top-headlines"
+    params = {"language": "en", "pageSize": 50, "apiKey": NEWS_API_KEY}
+
+    r = requests.get(url, params=params, timeout=10)
+    data = r.json()
+    articles = data.get("articles", [])
+
+    if not articles:
+        raise Exception("No articles returned")
+
+    scores = [score(a.get("title", "")) for a in articles]
+    avg = sum(scores) / len(scores)
+
+    index = round((avg + 1) * 50, 2)
+
+    if index < 40:
+        summary = "Global emotional tone is tense and unstable."
+    elif index < 50:
+        summary = "Global emotional tone is cautious and uncertain."
+    elif index < 60:
+        summary = "Global emotional tone is mixed but stabilizing."
+    else:
+        summary = "Global emotional tone is hopeful and constructive."
+
+    return index, summary
+
+
+def updater():
+    global CURRENT_INDEX, CURRENT_SUMMARY, LAST_UPDATE
+
+    while True:
+        try:
+            idx, summ = compute_emotion()
+            CURRENT_INDEX = idx
+            CURRENT_SUMMARY = summ
+            LAST_UPDATE = datetime.utcnow().isoformat()
+            print(f"[UPDATE] {LAST_UPDATE} → {idx}")
+        except Exception as e:
+            print("Update error:", e)
+
+        time.sleep(1800)  # 30 minutes
+
+
+def initialize():
+    global CURRENT_INDEX, CURRENT_SUMMARY, LAST_UPDATE
+    try:
+        idx, summ = compute_emotion()
+        CURRENT_INDEX = idx
+        CURRENT_SUMMARY = summ
+        LAST_UPDATE = datetime.utcnow().isoformat()
+        print(f"[INIT] {LAST_UPDATE} → {idx}")
+    except Exception as e:
+        print("Initialization error:", e)
+
+
+initialize()
+threading.Thread(target=updater, daemon=True).start()
 
 
 @app.route("/")
-def home():
-    return "Empath-Brain debug server running."
+def root():
+    return "Empath-Brain live."
 
 
 @app.route("/emotion")
 def emotion():
-    """
-    TEMP DEBUG ROUTE
-    Shows exactly what NewsAPI returns from inside Render.
-    """
-
-    if not NEWS_API_KEY:
-        return jsonify({
-            "error": "NEWS_API_KEY not found in environment",
-            "env_key_present": False
-        })
-
-    try:
-        url = "https://newsapi.org/v2/top-headlines"
-        params = {
-            "language": "en",
-            "pageSize": 5,
-            "apiKey": NEWS_API_KEY
-        }
-
-        r = requests.get(url, params=params, timeout=10)
-
-        return jsonify({
-            "env_key_present": True,
-            "status_code": r.status_code,
-            "response_json": r.json()
-        })
-
-    except Exception as e:
-        return jsonify({
-            "env_key_present": True,
-            "exception": str(e)
-        })
+    return jsonify({
+        "index": CURRENT_INDEX,
+        "last_update": LAST_UPDATE,
+        "summary": CURRENT_SUMMARY
+    })
 
 
 @app.route("/narrative")
 def narrative():
-    return "Debug mode active."
+    return jsonify({"text": CURRENT_SUMMARY})
 
 
 @app.route("/witness")
 def witness():
-    return "Debug mode active."
+    return jsonify({"message": CURRENT_SUMMARY})
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
