@@ -5,3 +5,5 @@ services:
     buildCommand: ""
     startCommand: gunicorn app:app
     plan: free
+
+NEWS_API_KEY = 67ec45cddcf64dad9a84c9aea7ada174
