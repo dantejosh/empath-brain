@@ -9,7 +9,7 @@ from flask import Flask, jsonify
 app = Flask(__name__)
 
 # ---------- CONFIG ----------
-NEWS_API_KEY = os.getenv("67ec45cddcf64dad9a84c9aea7ada174")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 
 # ---------- GLOBAL STATE ----------
 CURRENT_INDEX = 50.0
@@ -156,3 +156,4 @@ def witness():
 # ---------- RUN ----------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
