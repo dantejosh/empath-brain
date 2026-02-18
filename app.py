@@ -15,13 +15,13 @@ analyzer = SentimentIntensityAnalyzer()
 CURRENT_INDEX = 50.0
 CURRENT_SUMMARY = "Initializing global emotional state..."
 LAST_UPDATE = None
+background_started = False
 
-FETCH_INTERVAL = 600  # 10 minutes
-FETCH_TIMEOUT = 5     # seconds
+FETCH_INTERVAL = 600
+FETCH_TIMEOUT = 5
 
 
 def fetch_emotion_once():
-    """Fetch world emotion safely with strict timeout."""
     global CURRENT_INDEX, CURRENT_SUMMARY, LAST_UPDATE
 
     if not NEWS_API_KEY:
@@ -39,11 +39,10 @@ def fetch_emotion_once():
             CURRENT_SUMMARY = "No articles returned."
             return
 
-        scores = []
-        for a in articles:
-            title = a.get("title", "")
-            if title:
-                scores.append(analyzer.polarity_scores(title)["compound"])
+        scores = [
+            analyzer.polarity_scores(a.get("title", ""))["compound"]
+            for a in articles if a.get("title")
+        ]
 
         if not scores:
             CURRENT_SUMMARY = "No valid headlines."
@@ -68,21 +67,22 @@ def fetch_emotion_once():
 
 
 def background_fetch_loop():
-    """Runs forever but never blocks server startup."""
     while True:
         fetch_emotion_once()
         time.sleep(FETCH_INTERVAL)
 
 
-# Start background thread AFTER server boots
 def start_background_thread():
     thread = threading.Thread(target=background_fetch_loop, daemon=True)
     thread.start()
 
 
-@app.before_first_request
+@app.before_request
 def activate_background_fetch():
-    start_background_thread()
+    global background_started
+    if not background_started:
+        start_background_thread()
+        background_started = True
 
 
 @app.route("/")
