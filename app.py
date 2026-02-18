@@ -3,7 +3,6 @@ import time
 from datetime import datetime
 import os
 import requests
-
 from flask import Flask, jsonify
 
 app = Flask(__name__)
@@ -17,7 +16,7 @@ CURRENT_SUMMARY = "Initializing global emotional state..."
 LAST_UPDATE = None
 
 
-# ---------- SENTIMENT HELPERS ----------
+# ---------- SENTIMENT WORD LISTS ----------
 NEGATIVE_WORDS = [
     "war", "attack", "killed", "death", "crisis", "disaster",
     "explosion", "conflict", "strike", "collapse", "flood",
@@ -61,7 +60,6 @@ def compute_global_emotion():
     data = r.json()
 
     articles = data.get("articles", [])
-
     if not articles:
         raise Exception("No news articles returned")
 
@@ -76,7 +74,7 @@ def compute_global_emotion():
     # convert -1..1 → 0..100
     index = round((avg + 1) * 50, 2)
 
-    # narrative
+    # narrative summary
     if index < 40:
         summary = "Global emotional tone is tense and unstable."
     elif index < 50:
@@ -136,7 +134,12 @@ def home():
 
 @app.route("/emotion")
 def emotion():
+    """
+    DEBUG VIEW — shows whether the API key is visible.
+    """
     return jsonify({
+        "env_key_present": NEWS_API_KEY is not None,
+        "env_key_value": NEWS_API_KEY,
         "index": CURRENT_INDEX,
         "last_update": LAST_UPDATE,
         "summary": CURRENT_SUMMARY
