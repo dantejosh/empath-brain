@@ -14,6 +14,8 @@ CURRENT_INDEX = 50.0
 CURRENT_SUMMARY = "Initializing global emotional state..."
 LAST_UPDATE = None
 
+updater_started = False
+
 
 NEGATIVE = [
     "war","attack","killed","death","crisis","disaster","explosion",
@@ -70,7 +72,7 @@ def compute_emotion():
     return index, summary
 
 
-def updater():
+def updater_loop():
     global CURRENT_INDEX, CURRENT_SUMMARY, LAST_UPDATE
 
     while True:
@@ -86,20 +88,17 @@ def updater():
         time.sleep(1800)  # 30 minutes
 
 
-def initialize():
-    global CURRENT_INDEX, CURRENT_SUMMARY, LAST_UPDATE
-    try:
-        idx, summ = compute_emotion()
-        CURRENT_INDEX = idx
-        CURRENT_SUMMARY = summ
-        LAST_UPDATE = datetime.utcnow().isoformat()
-        print(f"[INIT] {LAST_UPDATE} → {idx}")
-    except Exception as e:
-        print("Initialization error:", e)
-
-
-initialize()
-threading.Thread(target=updater, daemon=True).start()
+@app.before_request
+def start_updater_once():
+    """
+    Start background updater only after server is live.
+    Prevents Render deploy hang.
+    """
+    global updater_started
+    if not updater_started:
+        threading.Thread(target=updater_loop, daemon=True).start()
+        updater_started = True
+        print("[START] Background updater launched")
 
 
 @app.route("/")
