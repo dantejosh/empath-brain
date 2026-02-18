@@ -1,146 +1,180 @@
-import os
-import requests
-from flask import Flask, jsonify
-from datetime import datetime
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Adafruit_NeoPixel.h>
+#include <time.h>
+#include <math.h>
 
-app = Flask(__name__)
+// WIFI
+const char* WIFI_SSID = "67";
+const char* WIFI_PASS = "Quandt85!!!~";
+const char* EMOTION_URL = "https://empath-brain.onrender.com/emotion";
 
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-MARKET_API_KEY = os.getenv("MARKET_API_KEY")  # optional (works without it)
+// LED
+#define LED_PIN 13
+#define LED_COUNT 44
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
-# --------------------------------------------------
-# SIMPLE KEYWORD SENTIMENT (no NLP, deterministic)
-# --------------------------------------------------
+// TIMING
+const unsigned long POLL_INTERVAL = 300000;
+unsigned long lastPoll = 0;
+unsigned long startTime = 0;
 
-POSITIVE_WORDS = [
-    "growth", "gain", "peace", "deal", "recover", "record",
-    "improve", "success", "optimistic", "strong"
-]
+// EMOTION
+int liveIndex = 43;
+float memoryIndex = 43.0;
 
-NEGATIVE_WORDS = [
-    "war", "crisis", "drop", "loss", "fear", "inflation",
-    "conflict", "decline", "recession", "risk"
-]
+float currentHue = 32, targetHue = 32;
+float baseBrightness = 0.26, targetBrightness = 0.26;
+float breathPeriod = 7.0, targetBreath = 7.0;
 
+float hueDrift = 0;
 
-def headline_sentiment_score():
-    """Return value in range -1 → +1"""
-    try:
-        url = (
-            "https://newsapi.org/v2/top-headlines?"
-            "language=en&pageSize=20&apiKey=" + NEWS_API_KEY
-        )
-        data = requests.get(url, timeout=3).json()
-        articles = data.get("articles", [])
+// WIFI
+void connectWiFi() {
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while (WiFi.status() != WL_CONNECTED) delay(300);
+}
 
-        score = 0
-        count = 0
+// TIME
+void initTime() {
+  configTzTime("EST5EDT,M3.2.0,M11.1.0", "pool.ntp.org");
+  struct tm t;
+  while (!getLocalTime(&t)) delay(300);
+}
 
-        for a in articles:
-            title = (a.get("title") or "").lower()
+int getHour() {
+  struct tm t;
+  if (!getLocalTime(&t)) return 12;
+  return t.tm_hour;
+}
 
-            pos = any(w in title for w in POSITIVE_WORDS)
-            neg = any(w in title for w in NEGATIVE_WORDS)
+// FETCH
+int fetchEmotion() {
+  if (WiFi.status() != WL_CONNECTED) return liveIndex;
 
-            if pos:
-                score += 1
-                count += 1
-            elif neg:
-                score -= 1
-                count += 1
+  HTTPClient http;
+  http.begin(EMOTION_URL);
+  http.setTimeout(3000);
 
-        if count == 0:
-            return 0
+  int code = http.GET();
 
-        return score / count
+  if (code == 200) {
+    DynamicJsonDocument doc(256);
+    deserializeJson(doc, http.getString());
+    http.end();
+    return doc["index"];
+  }
 
-    except Exception:
-        return 0
+  http.end();
+  return liveIndex;
+}
 
+// MEMORY
+void updateMemory() {
+  float rate = 0.002;
+  memoryIndex += (liveIndex - memoryIndex) * rate;
+}
 
-# --------------------------------------------------
-# MARKET MOOD (simple daily % change proxy)
-# --------------------------------------------------
+// MAP EMOTION  (neutral band corrected)
+void mapEmotion(float idx) {
 
-def market_sentiment_score():
-    """Return value in range -1 → +1"""
-    try:
-        # Free demo endpoint (no key required)
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1d&range=2d"
-        data = requests.get(url, timeout=3).json()
+  if (idx < 30) { targetHue = 320; targetBrightness = 0.16; targetBreath = 5.0; }
+  else if (idx < 45) { targetHue = 25; targetBrightness = 0.22; targetBreath = 6.0; }
 
-        closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+  // ---- FIXED NEUTRAL BAND ----
+  else if (idx < 60) { targetHue = 32; targetBrightness = 0.26; targetBreath = 7.0; }
 
-        if len(closes) < 2 or closes[-2] is None or closes[-1] is None:
-            return 0
+  else if (idx < 80) { targetHue = 185; targetBrightness = 0.36; targetBreath = 9.0; }
+  else { targetHue = 155; targetBrightness = 0.46; targetBreath = 11.0; }
+}
 
-        change = (closes[-1] - closes[-2]) / closes[-2]
+// DAY MOD
+float dayBrightnessMultiplier() {
+  int h = getHour();
+  if (h < 6) return 0.5;
+  if (h < 10) return 0.75;
+  if (h < 18) return 1.0;
+  if (h < 22) return 0.8;
+  return 0.6;
+}
 
-        # Clamp to reasonable emotional range
-        return max(-1, min(1, change * 10))
+// SMOOTH
+float smoothStep(float a, float b, float t) {
+  return a + (b - a) * t;
+}
 
-    except Exception:
-        return 0
+// HSV → RGB  (raised saturation for visibility)
+uint32_t hsvToRgb(float h, float v) {
 
+  float s = 0.72;   // ← key perceptual fix
 
-# --------------------------------------------------
-# COMBINE INTO EMOTION INDEX
-# --------------------------------------------------
+  float c = v * s;
+  float x = c * (1 - fabs(fmod(h / 60.0, 2) - 1));
+  float m = v - c;
 
-def compute_emotion_index():
-    news = headline_sentiment_score()
-    market = market_sentiment_score()
+  float r, g, b;
 
-    # Weighted blend (news slightly stronger)
-    combined = (0.6 * news) + (0.4 * market)
+  if (h < 60) { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else { r = c; g = 0; b = x; }
 
-    # Map -1..1 → 0..100
-    index = int(50 + combined * 25)
+  return strip.Color((r + m) * 255, (g + m) * 255, (b + m) * 255);
+}
 
-    # Clamp
-    index = max(0, min(100, index))
+// BREATH
+float breathingBrightness() {
+  float t = (millis() - startTime) / 1000.0;
 
-    return index, news, market
+  float breath = sin((2 * PI * t) / breathPeriod) * 0.5 + 0.5;
+  float swell  = sin((2 * PI * t) / 40.0) * 0.5 + 0.5;
 
+  float visible = 0.35 + 0.65 * breath;
 
-def emotion_summary(index):
-    if index < 30:
-        return "Global emotional tone feels strained and unstable."
-    elif index < 45:
-        return "Global emotional tone feels tense and uncertain."
-    elif index < 60:
-        return "Global emotional tone feels cautious and neutral."
-    elif index < 80:
-        return "Global emotional tone feels steady and grounded."
-    else:
-        return "Global emotional tone feels optimistic and open."
+  return baseBrightness * dayBrightnessMultiplier() * visible * (0.8 + 0.2 * swell);
+}
 
+// RENDER
+void renderFrame() {
 
-# --------------------------------------------------
-# ROUTES
-# --------------------------------------------------
+  hueDrift += 0.0008;
 
-@app.route("/")
-def home():
-    return "Empath brain running."
+  currentHue = smoothStep(currentHue, targetHue, 0.01);
+  baseBrightness = smoothStep(baseBrightness, targetBrightness, 0.01);
+  breathPeriod = smoothStep(breathPeriod, targetBreath, 0.01);
 
+  float hue = currentHue + 2.0 * sin(hueDrift);
+  float bright = constrain(breathingBrightness(), 0.0, 1.0);
 
-@app.route("/emotion")
-def emotion():
-    index, news, market = compute_emotion_index()
+  uint32_t color = hsvToRgb(hue, bright);
 
-    return jsonify({
-        "index": index,
-        "summary": emotion_summary(index),
-        "news_component": round(news, 3),
-        "market_component": round(market, 3),
-        "timestamp": datetime.utcnow().isoformat() + "Z"
-    })
+  for (int i = 0; i < LED_COUNT; i++) strip.setPixelColor(i, color);
+  strip.show();
+}
 
+// SETUP
+void setup() {
+  strip.begin();
+  strip.show();
+  connectWiFi();
+  initTime();
+  startTime = millis();
+}
 
-# --------------------------------------------------
-# RUN
-# --------------------------------------------------
+// LOOP
+void loop() {
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+  if (millis() - lastPoll > POLL_INTERVAL) {
+    liveIndex = fetchEmotion();
+    lastPoll = millis();
+  }
+
+  updateMemory();
+  mapEmotion(memoryIndex);
+
+  renderFrame();
+  delay(16);
+}
