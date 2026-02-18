@@ -1,4 +1,8 @@
 import os
+import threading
+import time
+from datetime import datetime
+
 import requests
 from flask import Flask, jsonify
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -8,50 +12,77 @@ app = Flask(__name__)
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 analyzer = SentimentIntensityAnalyzer()
 
+CURRENT_INDEX = 50.0
+CURRENT_SUMMARY = "Initializing global emotional state..."
+LAST_UPDATE = None
 
-def compute_emotion():
+FETCH_INTERVAL = 600  # 10 minutes
+FETCH_TIMEOUT = 5     # seconds
+
+
+def fetch_emotion_once():
+    """Fetch world emotion safely with strict timeout."""
+    global CURRENT_INDEX, CURRENT_SUMMARY, LAST_UPDATE
+
     if not NEWS_API_KEY:
-        return 50.0, "Missing NEWS_API_KEY."
-
-    url = "https://newsapi.org/v2/top-headlines"
-    params = {"language": "en", "pageSize": 50, "apiKey": NEWS_API_KEY}
+        CURRENT_SUMMARY = "Missing NEWS_API_KEY."
+        return
 
     try:
-        r = requests.get(url, params=params, timeout=10)
+        url = "https://newsapi.org/v2/top-headlines"
+        params = {"language": "en", "pageSize": 50, "apiKey": NEWS_API_KEY}
+
+        r = requests.get(url, params=params, timeout=FETCH_TIMEOUT)
         articles = r.json().get("articles", [])
 
         if not articles:
-            return 50.0, "No articles returned."
+            CURRENT_SUMMARY = "No articles returned."
+            return
 
         scores = []
-
         for a in articles:
             title = a.get("title", "")
             if title:
-                sentiment = analyzer.polarity_scores(title)["compound"]
-                scores.append(sentiment)
+                scores.append(analyzer.polarity_scores(title)["compound"])
 
         if not scores:
-            return 50.0, "No valid headlines."
+            CURRENT_SUMMARY = "No valid headlines."
+            return
 
         avg = sum(scores) / len(scores)
+        CURRENT_INDEX = round((avg + 1) * 50, 2)
 
-        # convert -1..1 → 0..100
-        index = round((avg + 1) * 50, 2)
-
-        if index < 40:
-            summary = "Global emotional tone is tense and negative."
-        elif index < 50:
-            summary = "Global emotional tone is cautious and uneasy."
-        elif index < 60:
-            summary = "Global emotional tone is mixed and watchful."
+        if CURRENT_INDEX < 40:
+            CURRENT_SUMMARY = "Global emotional tone is tense and negative."
+        elif CURRENT_INDEX < 50:
+            CURRENT_SUMMARY = "Global emotional tone is cautious and uneasy."
+        elif CURRENT_INDEX < 60:
+            CURRENT_SUMMARY = "Global emotional tone is mixed and watchful."
         else:
-            summary = "Global emotional tone is hopeful and constructive."
+            CURRENT_SUMMARY = "Global emotional tone is hopeful and constructive."
 
-        return index, summary
+        LAST_UPDATE = datetime.utcnow().isoformat()
 
     except Exception as e:
-        return 50.0, f"Error: {str(e)}"
+        CURRENT_SUMMARY = f"Fetch error: {str(e)}"
+
+
+def background_fetch_loop():
+    """Runs forever but never blocks server startup."""
+    while True:
+        fetch_emotion_once()
+        time.sleep(FETCH_INTERVAL)
+
+
+# Start background thread AFTER server boots
+def start_background_thread():
+    thread = threading.Thread(target=background_fetch_loop, daemon=True)
+    thread.start()
+
+
+@app.before_first_request
+def activate_background_fetch():
+    start_background_thread()
 
 
 @app.route("/")
@@ -61,20 +92,21 @@ def root():
 
 @app.route("/emotion")
 def emotion():
-    index, summary = compute_emotion()
-    return jsonify({"index": index, "summary": summary})
+    return jsonify({
+        "index": CURRENT_INDEX,
+        "summary": CURRENT_SUMMARY,
+        "last_update": LAST_UPDATE
+    })
 
 
 @app.route("/narrative")
 def narrative():
-    index, summary = compute_emotion()
-    return jsonify({"text": summary})
+    return jsonify({"text": CURRENT_SUMMARY})
 
 
 @app.route("/witness")
 def witness():
-    index, summary = compute_emotion()
-    return jsonify({"message": summary})
+    return jsonify({"message": CURRENT_SUMMARY})
 
 
 if __name__ == "__main__":
