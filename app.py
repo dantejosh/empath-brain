@@ -6,15 +6,18 @@ import time
 app = Flask(__name__)
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+MARKET_API_KEY = os.getenv("MARKET_API_KEY")  # optional (Alpha Vantage, etc.)
 
-# ---- simple in-memory state (safe on Render) ----
+# ---- cache state ----
 CACHE_DURATION = 300  # 5 minutes
 last_fetch_time = 0
-last_index = 43  # stable non-50 starting point
+last_index = 43
 
 
-def fetch_raw_emotion():
-    """Pull headlines and compute weighted keyword score."""
+# ------------------------------------------------------------------
+# NEWS SENTIMENT
+# ------------------------------------------------------------------
+def fetch_news_score():
     url = "https://newsapi.org/v2/top-headlines"
     params = {
         "language": "en",
@@ -26,40 +29,81 @@ def fetch_raw_emotion():
     data = r.json()
     headlines = [a["title"].lower() for a in data.get("articles", [])]
 
-    positive_words = ["growth", "peace", "win", "hope", "success", "recover", "recovery"]
+    positive = ["growth", "peace", "win", "hope", "success", "recovery"]
     strong_negative = ["war", "attack", "death", "crisis", "disaster"]
     mild_negative = ["fear", "loss", "conflict", "tension"]
 
     score = 0
 
     for h in headlines:
-        if any(w in h for w in positive_words):
+        if any(w in h for w in positive):
             score += 1
         if any(w in h for w in strong_negative):
             score -= 2
         elif any(w in h for w in mild_negative):
             score -= 1
 
-    # Center near mid-40s
-    raw_index = max(0, min(100, 45 + score))
-    return raw_index
+    return score
 
 
+# ------------------------------------------------------------------
+# MARKET SENTIMENT (very lightweight)
+# ------------------------------------------------------------------
+def fetch_market_score():
+    """
+    Uses S&P 500 daily percent change as mood proxy.
+    Falls back to neutral if API unavailable.
+    """
+
+    if not MARKET_API_KEY:
+        return 0  # neutral if no key configured
+
+    try:
+        url = "https://www.alphavantage.co/query"
+        params = {
+            "function": "GLOBAL_QUOTE",
+            "symbol": "SPY",
+            "apikey": MARKET_API_KEY,
+        }
+
+        r = requests.get(url, params=params, timeout=5)
+        data = r.json()
+
+        change_pct = float(data["Global Quote"]["10. change percent"].replace("%", ""))
+
+        # Convert percent change into small sentiment weight
+        if change_pct > 1:
+            return +3
+        elif change_pct > 0.2:
+            return +1
+        elif change_pct < -1:
+            return -3
+        elif change_pct < -0.2:
+            return -1
+        else:
+            return 0
+
+    except Exception:
+        return 0
+
+
+# ------------------------------------------------------------------
+# COMBINED EMOTION
+# ------------------------------------------------------------------
 def compute_emotion():
-    """
-    Cached + smoothed emotion computation.
-    Still fully synchronous and safe.
-    """
     global last_fetch_time, last_index
 
     now = time.time()
 
-    # Use cache if within 5 minutes
+    # ---- serve from cache ----
     if now - last_fetch_time < CACHE_DURATION:
         return last_index
 
     try:
-        raw_index = fetch_raw_emotion()
+        news_score = fetch_news_score()
+        market_score = fetch_market_score()
+
+        raw_index = max(0, min(100, 45 + news_score + market_score))
 
         # ---- temporal smoothing ----
         smoothed = int(0.7 * last_index + 0.3 * raw_index)
@@ -70,10 +114,12 @@ def compute_emotion():
         return smoothed
 
     except Exception:
-        # fallback keeps sculpture alive
         return last_index
 
 
+# ------------------------------------------------------------------
+# ROUTES
+# ------------------------------------------------------------------
 @app.route("/emotion")
 def emotion():
     index = compute_emotion()
