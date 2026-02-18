@@ -22,7 +22,7 @@ def fetch_news_score():
     }
 
     try:
-        r = requests.get(url, params=params, timeout=5)
+        r = requests.get(url, params=params, timeout=3)
         data = r.json()
         headlines = [a["title"].lower() for a in data.get("articles", [])]
 
@@ -58,7 +58,7 @@ def fetch_market_score():
             "apikey": MARKET_API_KEY,
         }
 
-        r = requests.get(url, params=params, timeout=5)
+        r = requests.get(url, params=params, timeout=3)
         data = r.json()
 
         change_pct = float(
@@ -85,24 +85,34 @@ def compute_emotion():
 
     now = time.time()
 
+    # Always return cached value instantly if still fresh
     if now - last_fetch_time < CACHE_DURATION:
         return last_index
 
+    news_score = 0
+    market_score = 0
+
+    # Safe news fetch
     try:
         news_score = fetch_news_score()
-        market_score = fetch_market_score()
-
-        raw_index = max(0, min(100, 45 + news_score + market_score))
-
-        smoothed = int(0.7 * last_index + 0.3 * raw_index)
-
-        last_index = smoothed
-        last_fetch_time = now
-
-        return smoothed
-
     except Exception:
-        return last_index
+        news_score = 0
+
+    # Safe market fetch
+    try:
+        market_score = fetch_market_score()
+    except Exception:
+        market_score = 0
+
+    raw_index = max(0, min(100, 45 + news_score + market_score))
+
+    # Smooth transition
+    smoothed = int(0.7 * last_index + 0.3 * raw_index)
+
+    last_index = smoothed
+    last_fetch_time = now
+
+    return smoothed
 
 
 @app.route("/emotion")
