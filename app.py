@@ -1,217 +1,163 @@
 from flask import Flask, jsonify, Response
 import requests
-import os
+import statistics
 import time
-from statistics import mean
-from collections import deque
 
 app = Flask(__name__)
 
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-NEWS_URL = "https://newsapi.org/v2/top-headlines?language=en&pageSize=10"
-FEAR_GREED_URL = "https://api.alternative.me/fng/"
+# ---------- Helpers ----------
 
-# ---------- sentiment keywords ----------
-POSITIVE = ["progress", "agreement", "recovery", "breakthrough", "stabilize"]
-NEGATIVE = ["war", "flood", "crisis", "displace", "violence", "collapse", "fear"]
-
-
-def score_text(text):
-    score = 50
-    t = text.lower()
-
-    for w in POSITIVE:
-        if w in t:
-            score += 10
-    for w in NEGATIVE:
-        if w in t:
-            score -= 10
-
-    return max(0, min(100, score))
-
-
-# ---------- data sources ----------
-def get_fear_greed():
+def get_market_sentiment():
+    """
+    Pull recent S&P 500 data from Yahoo Finance.
+    Convert % daily change into 0–100 emotion scale.
+    """
     try:
-        r = requests.get(FEAR_GREED_URL, timeout=5)
-        return float(r.json()["data"][0]["value"])
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?range=1d&interval=5m"
+        r = requests.get(url, timeout=10)
+        data = r.json()
+
+        closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        closes = [c for c in closes if c is not None]
+
+        if len(closes) < 2:
+            return 50.0
+
+        change_pct = ((closes[-1] - closes[0]) / closes[0]) * 100
+
+        # Map −2% → 0, 0% → 50, +2% → 100 (clamped)
+        index = max(0, min(100, 50 + (change_pct * 25)))
+        return round(index, 2)
+
     except Exception:
         return 50.0
 
 
-def get_headlines():
-    if not NEWS_API_KEY:
-        return []
-
+def get_news_sentiment():
+    """
+    Very lightweight proxy:
+    Pull top headlines count from a public RSS JSON mirror.
+    Use volatility of headline lengths as emotional tension proxy.
+    (Simple but effective for motion.)
+    """
     try:
-        r = requests.get(
-            NEWS_URL,
-            headers={"Authorization": NEWS_API_KEY},
-            timeout=5,
-        )
-        data = r.json()
-        return [a["title"] for a in data.get("articles", []) if a.get("title")]
+        url = "https://hnrss.org/frontpage.jsonfeed"
+        r = requests.get(url, timeout=10)
+        items = r.json().get("items", [])[:20]
+
+        lengths = [len(item.get("title", "")) for item in items]
+        if not lengths:
+            return 50.0
+
+        volatility = statistics.pstdev(lengths)
+
+        # Map volatility ~10–40 → 30–70
+        index = max(0, min(100, 50 + (volatility - 20)))
+        return round(index, 2)
+
     except Exception:
-        return []
+        return 50.0
 
 
-# ---------- emotional index ----------
-def compute_index(headlines):
-    structural = get_fear_greed()
+def compute_global_emotion():
+    """
+    Blend market + news.
+    Market weighted slightly higher for stability.
+    """
+    market = get_market_sentiment()
+    news = get_news_sentiment()
 
-    if headlines:
-        narrative_scores = [score_text(h) for h in headlines]
-        narrative = mean(narrative_scores)
-    else:
-        narrative = 50
+    blended = (market * 0.6) + (news * 0.4)
 
-    expressive = narrative
+    summary = build_summary(blended, market, news)
 
-    return round(0.15 * structural + 0.30 * narrative + 0.55 * expressive, 2)
-
-
-# ---------- trend memory ----------
-HISTORY = deque(maxlen=12)  # last 12 hours
+    return round(blended, 2), summary
 
 
-def detect_trend():
-    if len(HISTORY) < 4:
-        return ""
-
-    short = HISTORY[-1] - HISTORY[-3]
-    medium = HISTORY[-1] - HISTORY[0]
-
-    if abs(short) < 1.5 and abs(medium) < 2:
-        return "holding steady"
-    if short > 1.5 and medium > 2:
-        return "slowly easing"
-    if short < -1.5 and medium < -2:
-        return "gently darkening"
-    if abs(short) > 3:
-        return "after recent instability"
-
-    return ""
-
-
-# ---------- narrative builder ----------
-def build_narrative(index, headlines):
-    # sentence 1 — tone + trend
+def build_summary(index, market, news):
+    """
+    Human-readable narrative.
+    """
     if index < 35:
-        tone = "Global emotional tone is heavy and subdued"
-    elif index < 55:
-        tone = "Global emotional tone is cautious and uncertain"
-    elif index < 70:
-        tone = "Global emotional tone is steady with guarded optimism"
+        tone = "heavy and pessimistic"
+    elif index < 45:
+        tone = "cautious and uncertain"
+    elif index < 60:
+        tone = "balanced with mixed signals"
+    elif index < 75:
+        tone = "guardedly optimistic"
     else:
-        tone = "Global emotional tone is broadly optimistic"
+        tone = "strongly positive and confident"
 
-    trend = detect_trend()
-    if trend:
-        tone += f", {trend}"
-
-    # sentence 2 — real-world drivers
-    if not headlines:
-        cause = "Signals remain diffuse, without a single dominant global event."
-    else:
-        ranked = sorted(headlines, key=lambda h: abs(score_text(h) - 50), reverse=True)
-        selected = ranked[:2]
-        cause = "Key drivers include: " + "; ".join(selected) + "."
-
-    return f"{tone}. {cause}"
+    return (
+        f"Global emotional tone is {tone}. "
+        f"Market signal: {market:.1f}. "
+        f"News tension signal: {news:.1f}."
+    )
 
 
-# ---------- hourly cache ----------
-LAST_UPDATE_HOUR = None
-CACHED_INDEX = 50.0
-CACHED_SUMMARY = "Initializing global emotional state."
+# ---------- Routes ----------
 
-
-def get_hour():
-    return int(time.time() // 3600)
-
-
-def refresh_if_needed():
-    global LAST_UPDATE_HOUR, CACHED_INDEX, CACHED_SUMMARY
-
-    current_hour = get_hour()
-    if LAST_UPDATE_HOUR == current_hour:
-        return
-
-    headlines = get_headlines()
-    new_index = compute_index(headlines)
-
-    HISTORY.append(new_index)
-
-    # meaningful but calm update threshold
-    if abs(new_index - CACHED_INDEX) >= 2:
-        CACHED_INDEX = new_index
-        CACHED_SUMMARY = build_narrative(new_index, headlines)
-
-    LAST_UPDATE_HOUR = current_hour
-
-
-# ---------- routes ----------
 @app.route("/")
-def home():
-    return "Empath brain running."
+def root():
+    return "Empath-Brain is running."
 
 
 @app.route("/emotion")
 def emotion():
-    refresh_if_needed()
-    return jsonify({"index": CACHED_INDEX})
+    index, summary = compute_global_emotion()
+    return jsonify({"index": index, "summary": summary})
 
 
 @app.route("/narrative")
 def narrative():
-    refresh_if_needed()
-    return jsonify({"index": CACHED_INDEX, "summary": CACHED_SUMMARY})
+    index, summary = compute_global_emotion()
+    return jsonify({"index": index, "summary": summary})
 
 
 @app.route("/witness")
 def witness():
-    refresh_if_needed()
-
-    if CACHED_INDEX < 50:
-        bg, fg = "#0b1a2a", "#e8f0ff"
-    else:
-        bg, fg = "#1a140b", "#fff6e8"
+    index, summary = compute_global_emotion()
 
     html = f"""
     <html>
-    <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-            body {{
-                margin: 0;
-                background: {bg};
-                color: {fg};
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                height: 100vh;
-                text-align: center;
-                padding: 2rem;
-            }}
-            .text {{
-                font-size: 1.4rem;
-                line-height: 1.6;
-                max-width: 34rem;
-                opacity: 0.92;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="text">{CACHED_SUMMARY}</div>
-    </body>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <style>
+                body {{
+                    margin: 0;
+                    background: black;
+                    color: white;
+                    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    height: 100vh;
+                    text-align: center;
+                    padding: 40px;
+                    font-size: 22px;
+                    line-height: 1.5;
+                }}
+                .index {{
+                    margin-top: 20px;
+                    font-size: 18px;
+                    opacity: 0.6;
+                }}
+            </style>
+        </head>
+        <body>
+            <div>
+                {summary}
+                <div class="index">Index: {index}</div>
+            </div>
+        </body>
     </html>
     """
 
     return Response(html, mimetype="text/html")
 
 
-# ---------- local run ----------
+# ---------- Run ----------
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=10000)
